@@ -51,6 +51,11 @@ impl Pmc {
     pub fn is_powered<P: PowerControl>(&self, peripheral: &P) -> bool {
         peripheral.is_powered(&self)
     }
+
+    pub fn boot_to_dfu (&mut self) {
+        self.raw.aoreg1.write(|w| unsafe { w.booterrorcounter().bits(0x0A) });
+        crate::raw::SCB::sys_reset();
+    }
 }
 
 pub trait PowerControl {
