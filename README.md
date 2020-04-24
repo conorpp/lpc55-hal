@@ -79,6 +79,20 @@ Just use following command:
   rustup target add thumbv8m.main-none-eabihf
 ```
 
+## Quick start
+
+Once you have the prereqs, you can connect to your target with JLINK and a JLINK debugger.
+
+```
+JLinkGDBServer -strict  -device LPC55S69 -if SWD
+```
+
+Then, in another terminal, run one of the examples.
+
+```
+cargo run --example led_minimalist --release
+```
+
 ## License
 
 [Apache-2.0][apache2-link] or [MIT][mit-link].
