@@ -19,6 +19,7 @@ use hal::drivers::{
     pins,
     UsbBus,
     Timer,
+    flash::FlashGordon,
 };
 use hal::traits::wg::digital::v2::ToggleableOutputPin;
 
@@ -77,9 +78,14 @@ fn print_type_of<T>(_: &T) {
 
 #[derive(Copy, Clone)]
 enum Commands {
-    Blink = 0x61,       // 'a'
+    Blink  = 0x61,       // 'a'
     Reboot = 0x62,      // 'b'
     DFU    = 0x63,      // 'c'
+}
+
+fn boot_to_dfu(flash: &mut FlashGordon){
+    flash.erase_page(0).unwrap();
+    hal::raw::SCB::sys_reset();
 }
 
 #[entry]
@@ -94,9 +100,17 @@ fn main() -> ! {
     let mut gpio = hal.gpio.enabled(&mut syscon);
     let mut iocon = hal.iocon.enabled(&mut syscon);
 
-    let mut red_led = pins::Pio1_6::take().unwrap()
+    let mut flash = hal::FlashGordon::new(hal.flash.enabled(&mut syscon));
+
+    let mut red_led = pins::Pio0_5::take().unwrap()
         .into_gpio_pin(&mut iocon, &mut gpio)
         .into_output(hal::drivers::pins::Level::High); // start turned off
+
+    // let mut _green_led = pins::Pio1_21::take().unwrap()
+    //     .into_gpio_pin(&mut iocon, &mut gpio)
+    //     .into_output(hal::drivers::pins::Level::Low); // start turned on
+
+
 
     let usb0_vbus_pin = pins::Pio0_22::take().unwrap()
         .into_usb0_vbus_pin(&mut iocon);
@@ -157,7 +171,7 @@ fn main() -> ! {
                     }
                     x if (Commands::DFU as u8) == x => {
                         info!("DFU").unwrap();
-                        pmc.boot_to_dfu();
+                        boot_to_dfu(&mut flash);
                     }
                     _ => {
                         info!("Invalid command {}", buf[0]).unwrap();
