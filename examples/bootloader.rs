@@ -53,7 +53,7 @@ pub fn drain_logs(cdc:
 
             match cdc.write_packet(&buf[..n]) {
                 Ok(_count) => {
-                    need_zlp = n == 8;
+                    need_zlp = n == 64;
                 },
                 _ => {}
             }
@@ -81,6 +81,7 @@ enum Commands {
     Blink  = 0x61,       // 'a'
     Reboot = 0x62,      // 'b'
     DFU    = 0x63,      // 'c'
+    ReadId = 0x69,      // 'i'
 }
 
 fn boot_to_dfu(flash: &mut FlashGordon){
@@ -138,7 +139,7 @@ fn main() -> ! {
 
     let usb_bus = UsbBus::new(usb_peripheral, usb0_vbus_pin);
 
-    let mut cdc_acm = CdcAcmClass::new(&usb_bus, 8);
+    let mut cdc_acm = CdcAcmClass::new(&usb_bus, 64);
     // print_type_of(&cdc_acm);
 
     let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x1209, 0xcc1d))
@@ -150,7 +151,7 @@ fn main() -> ! {
         .max_packet_size_0(64)
         .build();
 
-    let mut buf = [0u8; 8];
+    let mut buf = [0u8; 64];
 
     loop {
         if !usb_dev.poll(&mut [&mut cdc_acm]) {
@@ -167,14 +168,30 @@ fn main() -> ! {
                     x if (Commands::Reboot as u8) == x => {
                         info!("Reboot").unwrap();
                         hal::raw::SCB::sys_reset();
-                        
                     }
                     x if (Commands::DFU as u8) == x => {
                         info!("DFU").unwrap();
                         boot_to_dfu(&mut flash);
                     }
+                    x if (Commands::ReadId as u8) == x => {
+                        let mut uuid = [0u8; 16];
+                        // same UUID can be read from boot rom interface
+                        // UM: 48.8 UUID
+                        flash.read(0x0009_FC70, &mut uuid);
+
+                        info!("ID (dev): ").ok();
+                        drain_logs(&mut cdc_acm);
+                        info!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+                            uuid[0], uuid[1], uuid[2], uuid[3],
+                            uuid[4], uuid[5], uuid[6], uuid[7],
+                            uuid[8], uuid[9], uuid[10], uuid[11],
+                            uuid[12], uuid[13], uuid[14], uuid[15],
+                        ).unwrap();
+                        drain_logs(&mut cdc_acm);
+                    }
+                    
                     _ => {
-                        info!("Invalid command {}", buf[0]).unwrap();
+                        info!("Invalid command.").unwrap();
                     }
                 }
             },
