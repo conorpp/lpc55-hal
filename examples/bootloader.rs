@@ -81,16 +81,30 @@ enum Commands {
     Blink  = 0x61,       // 'a'
     Reboot = 0x62,      // 'b'
     DFU    = 0x63,      // 'c'
+    SetErrorCounter = 0x64,      // 'd'
     ReadId = 0x69,      // 'i'
+    ReadResetSource = 0x72,      // 'r'
+    ReadBootloader = 0x6d,      // 'm'
+    DumpBootloader = 0x6f,      // 'o'
 }
 
-fn boot_to_dfu(flash: &mut FlashGordon){
-    flash.erase_page(0).unwrap();
-    hal::raw::SCB::sys_reset();
+const BOOTROM_TREE_ADDR: u32 = 0x130010f0;
+fn boot_to_dfu() -> u32 {
+    // UM 9.3.4
+    // let ptr: *const () = 0x1301fe00 as *const ();
+    let bootrom_enter_location_addr: &u32 = unsafe { core::mem::transmute(BOOTROM_TREE_ADDR) };
+    let bootrom_enter_location: u32 = *bootrom_enter_location_addr;
+    let enter_bootrom_tree_code: extern "C" fn(u32)->u32 = unsafe { core::mem::transmute(bootrom_enter_location) };
+    
+    let arg = 0xEB110000;
+
+    enter_bootrom_tree_code(arg)
 }
 
 #[entry]
 fn main() -> ! {
+
+    // boot_to_dfu();
 
     let hal = hal::new();
 
@@ -171,7 +185,21 @@ fn main() -> ! {
                     }
                     x if (Commands::DFU as u8) == x => {
                         info!("DFU").unwrap();
-                        boot_to_dfu(&mut flash);
+                        let res = boot_to_dfu();
+                        info!("result: {}", res).unwrap();
+                    }
+                    x if (Commands::SetErrorCounter as u8) == x => {
+                        info!("Set error counter and reset").unwrap();
+                        pmc.boot_to_dfu();
+                    }
+                    x if (Commands::ReadResetSource as u8) == x => {
+                        info!("Reset source: ").unwrap();
+                        drain_logs(&mut cdc_acm);
+                        let sources = pmc.read_reset_sources();
+                        info!("power? {}", (sources & hal::peripherals::pmc::ResetSource::Power as u32) != 0).unwrap();
+                        info!("sw reset? {}", (sources & hal::peripherals::pmc::ResetSource::SoftReset as u32) != 0).unwrap();
+                        drain_logs(&mut cdc_acm);
+                        info!("booterrorcounter? {}", (sources & 0xf0000) >> 16).unwrap();
                     }
                     x if (Commands::ReadId as u8) == x => {
                         let mut uuid = [0u8; 16];
@@ -179,7 +207,7 @@ fn main() -> ! {
                         // UM: 48.8 UUID
                         flash.read(0x0009_FC70, &mut uuid);
 
-                        info!("ID (dev): ").ok();
+                        info!("ID (dec): ").ok();
                         drain_logs(&mut cdc_acm);
                         info!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
                             uuid[0], uuid[1], uuid[2], uuid[3],
@@ -188,6 +216,68 @@ fn main() -> ! {
                             uuid[12], uuid[13], uuid[14], uuid[15],
                         ).unwrap();
                         drain_logs(&mut cdc_acm);
+                    }
+
+                    x if (Commands::ReadBootloader as u8) == x => {
+                        let mut uuid = [0u8; 16];
+                        // same UUID can be read from boot rom interface
+                        // UM: 48.8 UUID
+                        flash.read(BOOTROM_TREE_ADDR as usize, &mut uuid);
+
+                        info!("header (dec): ").ok();
+                        drain_logs(&mut cdc_acm);
+                        info!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+                            uuid[0], uuid[1], uuid[2], uuid[3],
+                            uuid[4], uuid[5], uuid[6], uuid[7],
+                            uuid[8], uuid[9], uuid[10], uuid[11],
+                            uuid[12], uuid[13], uuid[14], uuid[15],
+                        ).unwrap();
+                        drain_logs(&mut cdc_acm);
+
+                        let bootrom_enter_location_addr: &u32 = unsafe { core::mem::transmute(BOOTROM_TREE_ADDR) };
+                        // let bootrom_string_addr: &&[u8;16] = unsafe { core::mem::transmute(BOOTROM_TREE_ADDR + 20) };
+                        let bootrom_enter_location: u32 = *bootrom_enter_location_addr;
+                        // let enter_bootrom_tree_code: extern "C" fn(&u32)->u32 = unsafe { core::mem::transmute(bootrom_enter_location) };
+
+                        // let boot_string = unsafe{ core::str::from_utf8_unchecked(*bootrom_string_addr) }; 
+                        info!("BOOTROM_TREE_ADDR: {}", BOOTROM_TREE_ADDR).ok();
+                        drain_logs(&mut cdc_acm);
+                        info!("enter_location: {}", bootrom_enter_location).ok();
+                        drain_logs(&mut cdc_acm);
+                        // info!("s: {}", boot_string).ok();
+                        drain_logs(&mut cdc_acm);
+                        
+                        // let v1: &u32 = unsafe { core::mem::transmute(BOOTROM_TREE_ADDR+4) };
+                        // let v2: &u32 = unsafe { core::mem::transmute(BOOTROM_TREE_ADDR+8) };
+                        // let v3: &u32 = unsafe { core::mem::transmute(BOOTROM_TREE_ADDR+12) };
+                        // let v4: &u32 = unsafe { core::mem::transmute(BOOTROM_TREE_ADDR+16) };
+                        // info!("v: {}.{}.{}.{}", v1,v2,v3,v4).ok();
+                        // drain_logs(&mut cdc_acm);
+
+                    }
+
+                    x if (Commands::DumpBootloader as u8) == x => {
+                        let mut uuid = [0u8; 16];
+                        // same UUID can be read from boot rom interface
+                        // UM: 48.8 UUID
+                        //            0x0300_ff90
+                        for addr in  (0x1300_0000 .. 0x1302_0000).step_by(16) {
+                            for byte_addr in addr .. addr + 16 {
+                                let byte_pointer: &u8 = unsafe { core::mem::transmute(byte_addr) };
+                                uuid[(byte_addr - addr) as usize] = *byte_pointer;
+                            }
+                            // flash.read(addr, &mut uuid);
+                            info!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+                                uuid[0], uuid[1], uuid[2], uuid[3],
+                                uuid[4], uuid[5], uuid[6], uuid[7],
+                                uuid[8], uuid[9], uuid[10], uuid[11],
+                                uuid[12], uuid[13], uuid[14], uuid[15],
+                            ).unwrap();
+                            drain_logs(&mut cdc_acm);
+                        }
+
+                        info!("done.").ok();
+
                     }
                     
                     _ => {
