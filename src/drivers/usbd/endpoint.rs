@@ -21,6 +21,9 @@ use super::{
     endpoint_registers::Instance as EndpointRegistersInstance,
 };
 
+static mut MAX_OUT_SIZES: [usize; super::constants::NUM_ENDPOINTS] = [0usize; super::constants::NUM_ENDPOINTS];
+static mut MAX_IN_SIZES: [usize; super::constants::NUM_ENDPOINTS] = [0usize; super::constants::NUM_ENDPOINTS];
+
 /// Arbitrates access to the endpoint-specific registers and packet buffer memory.
 pub struct Endpoint  <USB>
 where USB: Usb<init_state::Enabled> {
@@ -64,7 +67,37 @@ where USB: Usb<init_state::Enabled> {
     pub fn is_out_buf_set(&self) -> bool { self.out_buf.is_some() }
 
     pub fn set_out_buf(&mut self, buffer: EndpointBuffer) {
+        unsafe{
+            MAX_OUT_SIZES[self.index() as usize] = buffer.capacity();
+        }
         self.out_buf = Some(Mutex::new(buffer));
+    }
+
+    pub fn get_max_out_packet_size (&self) -> usize { 
+        unsafe{
+            MAX_OUT_SIZES[self.index() as usize]
+        }
+    }
+
+    pub fn get_max_in_packet_size (&self) -> usize { 
+        unsafe{
+            MAX_IN_SIZES[self.index() as usize]
+        }
+    }
+
+    pub fn change_max_packet_size(&self, cs: &CriticalSection, epl: &EndpointRegistersInstance, new_size: usize) {
+        if self.is_out_buf_set() {
+            let buf = self.out_buf.as_ref().unwrap().borrow(cs);
+            debug_assert!(buf.capacity() >= new_size);
+            unsafe{ MAX_OUT_SIZES[self.index() as usize] = new_size; }
+            self.reset_out_buf(cs, epl);
+        }
+        if self.is_in_buf_set() {
+            let buf = self.in_buf.as_ref().unwrap().borrow(cs);
+            debug_assert!(buf.capacity() >= new_size);
+            unsafe{ MAX_IN_SIZES[self.index() as usize] = new_size; }
+            self.reset_in_buf(cs, epl);
+        }
     }
 
     pub fn reset_out_buf(&self, cs: &CriticalSection, epl: &EndpointRegistersInstance) {
@@ -73,7 +106,8 @@ where USB: Usb<init_state::Enabled> {
 
         let buf = self.out_buf.as_ref().unwrap().borrow(cs);
         let addroff = self.buf_addroff(buf);
-        let len = buf.capacity() as u16;
+        // let len = buf.capacity() as u16;
+        let len = self.get_max_out_packet_size() as u16;
         let i = self.index as usize;
 
         epl.eps[i].ep_out[0].modify(|_, w| w
@@ -118,6 +152,7 @@ where USB: Usb<init_state::Enabled> {
     pub fn is_in_buf_set(&self) -> bool { self.in_buf.is_some() }
 
     pub fn set_in_buf(&mut self, buffer: EndpointBuffer) {
+        unsafe{ MAX_IN_SIZES[self.index() as usize] = buffer.capacity(); }
         self.in_buf = Some(Mutex::new(buffer));
     }
 
@@ -177,7 +212,7 @@ where USB: Usb<init_state::Enabled> {
         if !self.is_in_buf_set() { return Err(UsbError::WouldBlock); }
         let in_buf = self.in_buf.as_ref().unwrap().borrow(cs);
 
-        if buf.len() > in_buf.capacity() {
+        if buf.len() > self.get_max_in_packet_size() {
             return Err(UsbError::BufferOverflow);
         }
 
@@ -242,7 +277,7 @@ where USB: Usb<init_state::Enabled> {
             let nbytes = epl.eps[i].ep_out[0].read().nbytes::<USB>().bits() as usize;
 
             // let count = min((out_buf.capacity() - nbytes) as usize, buf.len());
-            let count = (out_buf.capacity() - nbytes) as usize;
+            let count = (self.get_max_out_packet_size() - nbytes) as usize;
 
             out_buf.read(&mut buf[..count]);
 
@@ -250,7 +285,7 @@ where USB: Usb<init_state::Enabled> {
 
             // self.reset_out_buf(cs, epl);
             epl.eps[i].ep_out[0].modify(|_, w| w
-                .nbytes::<USB>().bits(out_buf.capacity() as u16)
+                .nbytes::<USB>().bits(self.get_max_out_packet_size() as u16)
                 .addroff::<USB>().bits(self.buf_addroff(out_buf))
                 .a().active()
                 // .d().enabled()
@@ -299,7 +334,7 @@ where USB: Usb<init_state::Enabled> {
             } else {
                 let out_buf = self.out_buf.as_ref().unwrap().borrow(cs);
                 let nbytes = epl.eps[0].ep_out[0].read().nbytes::<USB>().bits() as usize;
-                let count = min((out_buf.capacity() - nbytes) as usize, buf.len());
+                let count = min((self.get_max_out_packet_size() - nbytes) as usize, buf.len());
 
                 out_buf.read(&mut buf[..count]);
 

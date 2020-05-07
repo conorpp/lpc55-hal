@@ -46,6 +46,7 @@ use usb_device::{
 
 use crate::traits::usb::{
     Usb,
+    UsbSpeed,
 };
 use crate::{
     typestates::{
@@ -347,6 +348,8 @@ where
                 // modify_endpoint!(endpoint_list, eps, EP0OUT, A: Active);
             }
 
+            let current_speed = usb.get_current_speed();
+
             // non-CONTROL
             for ep in &self.endpoints[1..=self.max_endpoint] {
                 bit <<= 1;
@@ -399,6 +402,19 @@ where
                     //     hprintln!("error {}", err_code).ok();
                     // }
                 };
+
+                match current_speed {
+                    UsbSpeed::FullSpeed => {
+                        if ep.get_max_out_packet_size() > 64 {
+                            ep.change_max_packet_size(cs, eps, 64)
+                        }
+                    }
+                    UsbSpeed::HighSpeed => {
+                        if ep.get_max_out_packet_size() < 1024 {
+                            ep.change_max_packet_size(cs, eps, 1024)
+                        }
+                    }
+                }
             }
 
             usb.intstat.write(|w| w.dev_int().set_bit());
