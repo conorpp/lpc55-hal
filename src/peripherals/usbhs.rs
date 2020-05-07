@@ -47,6 +47,14 @@ unsafe impl Sync for EnabledUsbhsDevice {}
 impl Usb<init_state::Enabled> for EnabledUsbhsDevice {
     const SPEED: UsbSpeed = UsbSpeed::HighSpeed;
     // const NUM_ENDPOINTS: usize = 1 + 5;
+
+    fn get_current_speed (&self) -> UsbSpeed { 
+        if self.raw_hsd.devcmdstat.read().speed().bits() == 0b01 {
+            UsbSpeed::FullSpeed
+        } else {
+            UsbSpeed::HighSpeed
+        }
+    }
 }
 
 impl Usbhs {

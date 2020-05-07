@@ -8,6 +8,7 @@ pub enum UsbSpeed{
 
 pub trait Usb <State>: Deref<Target = crate::raw::usb1::RegisterBlock> + Sync  {
     const SPEED: UsbSpeed;
+    fn get_current_speed (&self) -> UsbSpeed;
     // TODO: Ideally, user could use both FS and HS peripherals.
     // Then the Cargo feature could go away as well.
     // For this, would need to move NUM_ENDPOINTS from global constants
