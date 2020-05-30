@@ -30,7 +30,29 @@ funnel!(NVIC_PRIO_BITS = hal::raw::NVIC_PRIO_BITS, {
     1: 1024,
 });
 
-pub fn drain_logs(cdc: 
+pub trait HexRepresentation2 {
+    fn hex(self) -> [u8; 2];
+}
+
+impl HexRepresentation2 for u8 {
+    fn hex(self) -> [u8; 2] {
+        let mut hex = [0x30, 0x30];
+
+        for i in 0 .. 2 {
+            let nibble = (self >> (i * 4)) & 0xf;
+            hex[1-i] = if  nibble < 0x0a {
+                nibble + 0x30
+            }
+            else
+            {
+                nibble + 0x41 - 0x0A
+            }
+        }
+        hex
+    }
+}
+
+pub fn drain_logs(cdc:
     &mut CdcAcmClass<
         hal::drivers::usbd::UsbBus<
             hal::peripherals::usbhs::Usbhs<
@@ -83,22 +105,27 @@ enum Commands {
     DFU    = 0x63,      // 'c'
     SetErrorCounter = 0x64,      // 'd'
     ReadId = 0x69,      // 'i'
-    ReadResetSource = 0x72,      // 'r'
     ReadBootloader = 0x6d,      // 'm'
     DumpBootloader = 0x6f,      // 'o'
 }
 
 const BOOTROM_TREE_ADDR: u32 = 0x130010f0;
-fn boot_to_dfu() -> u32 {
+fn boot_to_dfu(flash: &mut FlashGordon) {
+
+    // Currently just erasing the first flash page and reseting will force DFU..
+    flash.erase_page(0);
+
+    hal::raw::SCB::sys_reset();
+
     // UM 9.3.4
     // let ptr: *const () = 0x1301fe00 as *const ();
-    let bootrom_enter_location_addr: &u32 = unsafe { core::mem::transmute(BOOTROM_TREE_ADDR) };
-    let bootrom_enter_location: u32 = *bootrom_enter_location_addr;
-    let enter_bootrom_tree_code: extern "C" fn(u32)->u32 = unsafe { core::mem::transmute(bootrom_enter_location) };
-    
-    let arg = 0xEB110000;
+    // let bootrom_enter_location_addr: &u32 = unsafe { core::mem::transmute(BOOTROM_TREE_ADDR) };
+    // let bootrom_enter_location: u32 = *bootrom_enter_location_addr;
+    // let enter_bootrom_tree_code: extern "C" fn(u32)->u32 = unsafe { core::mem::transmute(bootrom_enter_location) };
 
-    enter_bootrom_tree_code(arg)
+    // let arg = 0xEB110000;
+
+    // enter_bootrom_tree_code(arg)
 }
 
 #[entry]
@@ -117,7 +144,7 @@ fn main() -> ! {
 
     let mut flash = hal::FlashGordon::new(hal.flash.enabled(&mut syscon));
 
-    let mut red_led = pins::Pio0_5::take().unwrap()
+    let mut red_led = pins::Pio1_21::take().unwrap()
         .into_gpio_pin(&mut iocon, &mut gpio)
         .into_output(hal::drivers::pins::Level::High); // start turned off
 
@@ -141,8 +168,13 @@ fn main() -> ! {
 
     let mut delay_timer = Timer::new(hal.ctimer.0.enabled(&mut syscon));
 
+    // do a blink
+    red_led.toggle().ok();
+    delay_timer.start(150.ms()); nb::block!(delay_timer.wait()).ok();
 
-    let usb_peripheral = hal.usbhs.enabled_as_device(
+    red_led.toggle().ok();
+
+    let mut usb_peripheral = hal.usbhs.enabled_as_device(
         &mut anactrl,
         &mut pmc,
         &mut syscon,
@@ -156,10 +188,20 @@ fn main() -> ! {
     let mut cdc_acm = CdcAcmClass::new(&usb_bus, 64);
     // print_type_of(&cdc_acm);
 
-    let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x1209, 0xcc1d))
+    // Get uuid of device and convert to hex string
+    let uuid = hal::uuid();
+    let mut uuidHex = [0x0u8; 32];
+    for i in 0..16 {
+        let byteHex = uuid[i].hex();
+        for j in 0 .. 2 {
+            uuidHex[i * 2 + j] = byteHex[j];
+        }
+    }
+
+    let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x1209, 0xbeee))
         .manufacturer("nickray")
         .product("Demo Demo Demo")
-        .serial_number("2019-10-10")
+        .serial_number(unsafe{core::str::from_utf8_unchecked(&uuidHex)})
         .device_release(0x0123)
         // Must be 64 bytes for HighSpeed
         .max_packet_size_0(64)
@@ -185,27 +227,15 @@ fn main() -> ! {
                     }
                     x if (Commands::DFU as u8) == x => {
                         info!("DFU").unwrap();
-                        let res = boot_to_dfu();
-                        info!("result: {}", res).unwrap();
+                        boot_to_dfu(&mut flash);
                     }
                     x if (Commands::SetErrorCounter as u8) == x => {
                         info!("Set error counter and reset").unwrap();
                         pmc.boot_to_dfu();
                     }
-                    x if (Commands::ReadResetSource as u8) == x => {
-                        info!("Reset source: ").unwrap();
-                        drain_logs(&mut cdc_acm);
-                        let sources = pmc.read_reset_sources();
-                        info!("power? {}", (sources & hal::peripherals::pmc::ResetSource::Power as u32) != 0).unwrap();
-                        info!("sw reset? {}", (sources & hal::peripherals::pmc::ResetSource::SoftReset as u32) != 0).unwrap();
-                        drain_logs(&mut cdc_acm);
-                        info!("booterrorcounter? {}", (sources & 0xf0000) >> 16).unwrap();
-                    }
                     x if (Commands::ReadId as u8) == x => {
-                        let mut uuid = [0u8; 16];
-                        // same UUID can be read from boot rom interface
-                        // UM: 48.8 UUID
-                        flash.read(0x0009_FC70, &mut uuid);
+
+                        let uuid = hal::uuid();
 
                         info!("ID (dec): ").ok();
                         drain_logs(&mut cdc_acm);
@@ -239,14 +269,14 @@ fn main() -> ! {
                         let bootrom_enter_location: u32 = *bootrom_enter_location_addr;
                         // let enter_bootrom_tree_code: extern "C" fn(&u32)->u32 = unsafe { core::mem::transmute(bootrom_enter_location) };
 
-                        // let boot_string = unsafe{ core::str::from_utf8_unchecked(*bootrom_string_addr) }; 
+                        // let boot_string = unsafe{ core::str::from_utf8_unchecked(*bootrom_string_addr) };
                         info!("BOOTROM_TREE_ADDR: {}", BOOTROM_TREE_ADDR).ok();
                         drain_logs(&mut cdc_acm);
                         info!("enter_location: {}", bootrom_enter_location).ok();
                         drain_logs(&mut cdc_acm);
                         // info!("s: {}", boot_string).ok();
                         drain_logs(&mut cdc_acm);
-                        
+
                         // let v1: &u32 = unsafe { core::mem::transmute(BOOTROM_TREE_ADDR+4) };
                         // let v2: &u32 = unsafe { core::mem::transmute(BOOTROM_TREE_ADDR+8) };
                         // let v3: &u32 = unsafe { core::mem::transmute(BOOTROM_TREE_ADDR+12) };
@@ -279,7 +309,7 @@ fn main() -> ! {
                         info!("done.").ok();
 
                     }
-                    
+
                     _ => {
                         info!("Invalid command.").unwrap();
                     }
