@@ -375,3 +375,9 @@ pub fn wait_at_least(delay_usecs: u32) {
     }
     while target > get_cycle_count() as u64 { continue; }
 }
+
+/// Read the UUID of LPC55 (UM 48.8).
+pub fn uuid() -> [u8; 16]{
+    let byte_pointer: &u128 = unsafe { core::mem::transmute(0x0009_FC70) };
+    (*byte_pointer).to_ne_bytes()
+}
