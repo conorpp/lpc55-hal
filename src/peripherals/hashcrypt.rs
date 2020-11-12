@@ -53,19 +53,26 @@ impl Hashcrypt<init_state::Enabled> {
     /// AES-128 "ECB", as in RustCrypto `block-cipher` trait
     pub fn aes128<'a>(&'a mut self, key: &[u8; 16]) -> aes::Aes128<'a> {
         let key = AesKey::User(GenericArray::clone_from_slice(key));
-        Aes::new(self, key, aes::Mode::Encrypt)
+        Aes::new(self, key, None, aes::Direction::Encrypt, aes::Mode::Ecb)
     }
+
+    pub fn aes128_icb<'a>(&'a mut self, key: &[u8; 16], iv: &[u8; 16]) -> aes::Aes128<'a> {
+        let key = AesKey::User(GenericArray::clone_from_slice(key));
+        let iv = GenericArray::clone_from_slice(iv);
+        Aes::new(self, key, Some(iv), aes::Direction::Encrypt, aes::Mode::Icb)
+    }
+
 
     /// AES-192 "ECB", as in RustCrypto `block-cipher` trait
     pub fn aes192<'a>(&'a mut self, key: &[u8; 24]) -> aes::Aes192<'a> {
         let key = AesKey::User(GenericArray::clone_from_slice(key));
-        Aes::new(self, key, aes::Mode::Encrypt)
+        Aes::new(self, key, None, aes::Direction::Encrypt, aes::Mode::Ecb)
     }
 
     /// AES-256 "ECB", as in RustCrypto `block-cipher` trait
     pub fn aes256<'a>(&'a mut self, key: &[u8; 32]) -> aes::Aes256<'a> {
         let key = AesKey::User(GenericArray::clone_from_slice(key));
-        Aes::new(self, key, aes::Mode::Encrypt)
+        Aes::new(self, key, None, aes::Direction::Encrypt, aes::Mode::Ecb)
     }
 
     /// AES "ECB" with PUF key, for use as in RustCrypto `block-cipher` trait
@@ -73,7 +80,7 @@ impl Hashcrypt<init_state::Enabled> {
     /// DOES NOT PROPERLY CHECK IF PUF AES KEY IS SETUP YET!
     /// TODO: have user pass in some token signaling PUF AES key is setup
     pub fn puf_aes<'a>(&'a mut self) -> aes::Aes256<'a> {
-        Aes::new(self, AesKey::Puf, aes::Mode::Encrypt)
+        Aes::new(self, AesKey::Puf, None, aes::Direction::Encrypt, aes::Mode::Ecb)
     }
 
 }

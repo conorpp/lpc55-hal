@@ -1,5 +1,6 @@
 use core::convert::TryInto;
 
+use cortex_m_semihosting::{dbg, hprintln};
 use aligned::{A4, Aligned};
 
 use crate::{
@@ -32,9 +33,15 @@ pub enum Key<Size: KeySize> {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub enum Mode {
+pub enum Direction {
     Encrypt,
     Decrypt,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum Mode {
+    Ecb,
+    Icb,
 }
 
 pub type Aes128Key = Key<U16>;
@@ -45,6 +52,8 @@ pub type Aes256Key = Key<U32>;
 pub struct Aes<'a, Size: KeySize> {
     inner: &'a mut Hashcrypt<Enabled>,
     key: Key<Size>,
+    iv: Option<GenericArray<u8, Size>>,
+    mode: Mode,
 }
 
 pub type Aes128<'a> = Aes<'a, U16>;
@@ -54,54 +63,57 @@ pub type Aes256<'a> = Aes<'a, U32>;
 impl<'a, Size: KeySize> Aes<'a, Size> {
 
     /// New AES struct implementing `block-cipher`.
-    pub fn new(hashcrypt: &'a mut Hashcrypt<Enabled>, key: Key<Size>, mode: Mode) -> Self {
-        let aes = Self { inner: hashcrypt, key };
-        aes.configure(mode);
+    pub fn new(hashcrypt: &'a mut Hashcrypt<Enabled>, key: Key<Size>, iv: Option<GenericArray<u8, Size>>, direction: Direction, mode: Mode) -> Self {
+        let aes = Self { inner: hashcrypt, key, iv: iv, mode};
+        aes.configure(direction, mode);
         aes
     }
 
     /// New AES starting in decryption mode
-    pub fn new_decrypt(hashcrypt: &'a mut Hashcrypt<Enabled>, key: Key<Size>) -> Self {
-        Self::new(hashcrypt, key, Mode::Decrypt)
+    pub fn new_decrypt(hashcrypt: &'a mut Hashcrypt<Enabled>, key: Key<Size>, iv: Option<GenericArray<u8, Size>>) -> Self {
+        Self::new(hashcrypt, key, iv, Direction::Decrypt, Mode::Ecb)
     }
 
     /// New AES starting in encryption mode
-    pub fn new_encrypt(hashcrypt: &'a mut Hashcrypt<Enabled>, key: Key<Size>) -> Self {
-        Self::new(hashcrypt, key, Mode::Encrypt)
+    pub fn new_encrypt(hashcrypt: &'a mut Hashcrypt<Enabled>, key: Key<Size>, iv: Option<GenericArray<u8, Size>>) -> Self {
+        Self::new(hashcrypt, key, iv, Direction::Encrypt, Mode::Ecb)
     }
 
     /// Optionally, configure peripheral for decryption ahead of time.
     pub fn prime_for_decryption(&self) {
-        self.configure(Mode::Encrypt);
+        self.configure(Direction::Encrypt, self.mode);
     }
 
     /// Optionally, configure peripheral for encryption ahead of time.
     pub fn prime_for_encryption(&self) {
-        self.configure(Mode::Encrypt);
+        self.configure(Direction::Encrypt, self.mode);
     }
 
     // TODO: It seems like it's not possible to switch the `cryptcfg.aesdecrypt` flag
     // after setup. Perhaps there is a magic incantation of register fiddling to achieve
     // this, which besides the context-switching cost would avoid having to store the
     // key inside the struct.
-    fn configure(&self, mode: Mode) {
+    fn configure(&self, direction: Direction, mode: Mode) {
 
         //
         // CRYPTCFG
         //
 
         self.cryptcfg.write(|w| {
-            let mut w = w
+            let w = w
                 .aesmode().ecb()
-                .msw1st_out().set_bit()
-                .swapkey().set_bit()
-                .swapdat().set_bit()
-                .msw1st().set_bit()
+                // .msw1st_out().set_bit()
+                // .swapkey().set_bit()
+                // .swapdat().set_bit()
+                // .msw1st().set_bit()
+                .icbstrm().blocks_8()
+                .icbsz().bits_32()
             ;
+            let mut w = unsafe{ w.aesctrpos().bits(6) };
 
-            match mode {
-                Mode::Encrypt => w = w.aesdecrypt().encrypt(),
-                Mode::Decrypt => w = w.aesdecrypt().decrypt(),
+            match direction {
+                Direction::Encrypt => w = w.aesdecrypt().encrypt(),
+                Direction::Decrypt => w = w.aesdecrypt().decrypt(),
             }
 
             match self.key {
@@ -118,13 +130,26 @@ impl<'a, Size: KeySize> Aes<'a, Size> {
 
             w
         });
+        hprintln!("cfg = {:02X}", self.cryptcfg.read().bits()).ok();
 
         //
         // CTRL
         //
 
         self.ctrl.write(|w| w.new_hash().start());
-        self.ctrl.write(|w| w.new_hash().start().mode().aes());
+        match mode {
+            Mode::Ecb => {
+                self.ctrl.write(|w| w.new_hash().start().mode().aes());
+            },
+            Mode::Icb => {
+                self.ctrl.write(|w| w.new_hash().start().mode().icb_aes());
+                self.mask[0].write(|w| unsafe{w.bits(0)});
+                self.mask[1].write(|w| unsafe{w.bits(0)});
+                self.mask[2].write(|w| unsafe{w.bits(0)});
+                self.mask[3].write(|w| unsafe{w.bits(0)});
+                hprintln!("ICB MODE.").ok();
+            }
+        }
 
         //
         // KEY
@@ -141,6 +166,7 @@ impl<'a, Size: KeySize> Aes<'a, Size> {
             }
 
             Key::User(key) => {
+                assert!(self.status.read().needkey().is_need());
                 let key: Aligned<A4, GenericArray<u8, Size>> = Aligned(key.clone());
                 self.indata.write(|w| unsafe { w.bits(u32::from_le_bytes(key[..4].try_into().unwrap())) } );
                 for (i, chunk) in key[4..].chunks(4).enumerate() {
@@ -150,26 +176,55 @@ impl<'a, Size: KeySize> Aes<'a, Size> {
         }
 
         assert!(self.status.read().needkey().is_not_need());
+        if let Some(iv) = self.iv.as_ref() {
+            hprintln!("writing iv").ok();
+            let iv: Aligned<A4, GenericArray<u8, Size>> = Aligned(iv.clone());
+            // dbg!(iv);
+
+            dbg!(u32::from_le_bytes(iv[..4].try_into().unwrap()));
+
+            self.indata.write(|w| unsafe { w.bits(u32::from_le_bytes(iv[..4].try_into().unwrap())) } );
+            assert!(self.status.read().neediv().is_need());
+            for (i, chunk) in iv[4..].chunks(4).enumerate() {
+                dbg!(u32::from_le_bytes(chunk.try_into().unwrap()));
+                assert!(self.status.read().neediv().is_need());
+                self.alias[i].write(|w| unsafe { w.bits(u32::from_le_bytes(chunk.try_into().unwrap())) } );
+            }
+
+        }
+        assert!(self.status.read().neediv().is_not_need());
     }
 
     fn one_block(&self, block: &mut Block<Self>) {
         // needs to be word-aligned
         let aligned_block: Aligned<A4, Block<Self>> = Aligned(block.clone());
         let addr: u32 = &aligned_block as *const _ as _;
+        // hprintln!("0.STAT = {:02X}", self.status.read().bits()).ok();
 
         self.memaddr.write(|w| unsafe { w.bits(addr) } );
         self.memctrl.write(|w| unsafe { w
             .master().enabled()
             .count().bits(1)
         });
+        // hprintln!("1.STAT = {:02X}", self.status.read().bits()).ok();
 
         while self.status.read().digest().is_not_ready() {
             continue;
         }
 
+        // hprintln!("2.STAT = {:02X}", self.status.read().bits()).ok();
+        // for i in 0..8 {
+            // let bytes = self.digest0[i].read().bits().to_be_bytes();
+            // for j in  0 .. bytes.len() {
+                // hprintln!("{:02X}", bytes[j]).ok();
+            // }
+        // }
         for i in 0..4 {
+            // hprintln!("STAT = {:02X}", self.status.read().bits()).ok();
             block.as_mut_slice()[4*i..4*i + 4].copy_from_slice(&self.digest0[i].read().bits().to_be_bytes());
         }
+
+        // hprintln!("3.STAT = {:02X}", self.status.read().bits()).ok();
     }
 }
 
@@ -182,7 +237,7 @@ impl<'a, Size: KeySize> BlockCipher for Aes<'a, Size> {
     fn encrypt_block(&self, block: &mut Block<Self>) {
         // unfortunate implementation detail
         if self.cryptcfg.read().aesdecrypt().is_decrypt() {
-            self.configure(Mode::Encrypt);
+            self.configure(Direction::Encrypt, self.mode);
         }
         self.one_block(block);
     }
@@ -190,7 +245,7 @@ impl<'a, Size: KeySize> BlockCipher for Aes<'a, Size> {
     fn decrypt_block(&self, block: &mut Block<Self>) {
         // unfortunate implementation detail
         if self.cryptcfg.read().aesdecrypt().is_encrypt() {
-            self.configure(Mode::Decrypt);
+            self.configure(Direction::Decrypt, self.mode);
         }
         self.one_block(block);
     }
